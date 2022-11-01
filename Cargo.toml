@@ -1,0 +1,26 @@
+[package]
+name = "vulkan-tutorial"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+#simple error handling
+anyhow = "1"
+#store static data like vertices
+lazy_static = "1"
+log = "0.4"
+#Rust replacement for GLM (graphics math library)
+nalgebra-glm = "0.10"
+#load pngs to use as textures
+png = "0.16"
+pretty_env_logger = "0.4"
+#used to define custom error types (without boilerplate)
+thiserror = "1"
+#used to load 3D models int the Wavefront .obj format
+tobj = "2"
+# to call the vulkan API
+vulkanalia = { version = "=0.12.0", features = ["libloading", "window"] }
+#creation of window to render to
+winit = "0.24"
