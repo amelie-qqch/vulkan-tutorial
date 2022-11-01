@@ -113,23 +113,70 @@ impl App {
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
-        create_command_buffers(&device, &mut data)?;
+        create_command_buffers(&logical_device, &mut data)?;
+        create_sync_objects(&logical_device, &mut data)?;
 
         Ok(Self { entry, instance, data, logical_device })
     }
 
     /// Renders a frame for Vulkan app
     unsafe fn render(&mut self, window: &Window) -> Result<()> {
+        //Récupération de l'index d'une image disponnible
+        let image_index = self
+            .logical_device
+            .acquire_next_image_khr(
+                self.data.swapchain,
+                u64::MAX,
+                //Les objets de synchro qui devront être signalé quand la partie pres à finit d'utiliser les images
+                self.data.image_available_semaphore,
+                vk::Fence::null(),
+            )?
+            .0 as usize;
+
+        //Spécifique quelle sémaphore il faut attendre avant que l'execution ne commence
+        let wait_semaphores = &[self.data.image_available_semaphore];
+        //On souhaite attendre de pouvoir appliquer les couleurs,
+        // donc que l'image soit dispo pour la stage qui écrit sur le color_attachment (si j'ai bien compris)
+        let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+
+        let command_buffers = &[self.data.command_buffers[image_index]];
+        //Les sémaphore à signaler quand le.s command_buffer a finit de s'éxecuter
+        let signal_semaphores = &[self.data.render_finished_semaphore];
+        let submit_info = vk::SubmitInfo::builder()
+            .wait_semaphores(wait_semaphores)
+            .wait_dst_stage_mask(wait_stages)
+            .command_buffers(command_buffers)
+            .signal_semaphores(signal_semaphores);
+
+        self.logical_device.queue_submit(
+            self.data.graphics_queue, &[submit_info], vk::Fence::null()
+        )?;
+
+        //PRESENTATION
+        let swapchains = &[self.data.swapchain];
+        let image_indices = &[image_index as u32];
+        let presentation_info = vk::PresentInfoKHR::builder()
+            .wait_semaphores(signal_semaphores)
+            .swapchains(swapchains)
+            .image_indices(image_indices);
+
+        self.logical_device.queue_present_khr(self.data.prensentation_queue, &presentation_info)?;
+
+
+
         Ok(())
     }
 
     /// Destroys Vulkan app
     #[rustfmt::skip]
     unsafe fn destroy(&mut self) {
+        self.logical_device.destroy_semaphore(self.data.render_finished_semaphore, None);
+        self.logical_device.destroy_semaphore(self.data.image_available_semaphore, None);
+
         self.logical_device.destroy_command_pool(self.data.command_pool, None);
         self.data.framebuffers
             .iter()
-            .for_each(|f0| self.logical_device.destroy_framebuffer(*f, None));
+            .for_each(|f| self.logical_device.destroy_framebuffer(*f, None));
 
         self.logical_device.destroy_pipeline(self.data.pipeline, None);
         self.logical_device.destroy_pipeline_layout(self.data.pipeline_layout, None);
@@ -141,12 +188,12 @@ impl App {
 
         self.logical_device.destroy_swapchain_khr(self.data.swapchain, None);
         self.logical_device.destroy_device(None);
+        self.instance.destroy_surface_khr(self.data.surface, None);
 
         if VALIDATION_ENABLED {
             self.instance.destroy_debug_utils_messenger_ext(self.data.messenger, None);
         }
 
-        self.instance.destroy_surface_khr(self.data.surface, None);
         self.instance.destroy_instance(None);
     }
 }
@@ -231,6 +278,8 @@ struct AppData{
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
     command_buffers: Vec<vk::CommandBuffer>,
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
 }
 
 /////// LOGICAL DEVICE ///////
@@ -313,10 +362,10 @@ unsafe fn check_physical_device(
     // }
 
     //Pas nécessaire
-    let features = instance.get_physical_device_features(physical_device);
-    if features.geometry_shader != vk::TRUE {
-        return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
-    }
+    // let features = instance.get_physical_device_features(physical_device);
+    // if features.geometry_shader != vk::TRUE {
+    //     return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
+    // }
 
     QueueFamilyIndices::get(instance, data, physical_device)?;
     check_physical_device_extensions(instance, physical_device)?;
@@ -396,9 +445,12 @@ unsafe fn create_swapchain(
     let presentation_mode = get_swapchain_presentation_mode(&support.presentation_modes);
     let extent = get_swapchain_extent(window, support.capabilities);
 
+    data.swapchain_format = surface_format.format;
+    data.swapchain_extent = extent;
+
     let mut image_count = support.capabilities.min_image_count + 1;
     if support.capabilities.max_image_count != 0
-        && image_count >  support.capabilities.max_image_count
+        && image_count > support.capabilities.max_image_count
     {
         image_count = support.capabilities.max_image_count;
     }
@@ -435,8 +487,6 @@ unsafe fn create_swapchain(
         // Pour l'instant on ne fait rien
         .old_swapchain(vk::SwapchainKHR::null());
 
-    data.swapchain_format = surface_format.format;
-    data.swapchain_extent = extent;
     data.swapchain = device.create_swapchain_khr(&info, None)?;
     data.swapchain_images = device.get_swapchain_images_khr(data.swapchain)?;
 
@@ -464,7 +514,7 @@ unsafe fn create_swapchain_image_views(
                 .base_mip_level(0)
                 .level_count(1)
                 .base_array_layer(0)
-                .level_count(1);
+                .layer_count(1);
 
             let info = vk::ImageViewCreateInfo::builder()
                 .image(*i)
@@ -487,7 +537,7 @@ fn get_swapchain_surface_format(
         .iter()
         .cloned()
         .find(|f| {
-            f.format == vk::Format::B8G8R8_SRGB
+            f.format == vk::Format::B8G8R8A8_SRGB
                 && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
         })
         .unwrap_or_else(|| formats[0])
@@ -507,7 +557,7 @@ fn get_swapchain_extent(
     window: &Window,
     capabilities: vk::SurfaceCapabilitiesKHR,
 ) -> vk::Extent2D {
-    if capabilities.current_extent.width != u32::max_value() {
+    if capabilities.current_extent.width != u32::MAX {
         capabilities.current_extent
     } else {
         let size = window.inner_size();
@@ -515,12 +565,12 @@ fn get_swapchain_extent(
         vk::Extent2D::builder()
             .width(clamp(
                 capabilities.min_image_extent.width,
-                capabilities.min_image_extent.width,
+                capabilities.max_image_extent.width,
                 size.width,
             ))
             .height(clamp(
                 capabilities.min_image_extent.height,
-                capabilities.min_image_extent.height,
+                capabilities.max_image_extent.height,
                 size.height
             ))
             .build()
@@ -661,11 +711,21 @@ unsafe fn create_render_pass(
         .color_attachments(color_attachments);
 
     // RENDER PASS
+    let dependency = vk::SubpassDependency::builder()
+        .src_subpass(vk::SUBPASS_EXTERNAL)
+        .dst_subpass(0)
+        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .src_access_mask(vk::AccessFlags::empty())
+        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
     let attachments = &[color_attachment];
     let subpasses = &[subpass];
+    let dependencies = &[dependency];
     let info = vk::RenderPassCreateInfo::builder()
         .attachments(attachments)
-        .subpasses(subpasses);
+        .subpasses(subpasses)
+        .dependencies(dependencies);
 
     data.render_pass = device.create_render_pass(&info, None)?;
 
@@ -824,6 +884,16 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
     }
 
 
+
+    Ok(())
+}
+
+/////// RENDERING AND PRESENTATION
+unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()> {
+    let semaphore_info = vk::SemaphoreCreateInfo::builder();
+
+    data.image_available_semaphore = device.create_semaphore(&semaphore_info, None)?;
+    data.render_finished_semaphore = device.create_semaphore(&semaphore_info, None)?;
 
     Ok(())
 }
