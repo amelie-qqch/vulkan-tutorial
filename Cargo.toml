@@ -12,15 +12,15 @@ anyhow = "1"
 lazy_static = "1"
 log = "0.4"
 #Rust replacement for GLM (graphics math library)
-nalgebra-glm = "0.10"
+nalgebra-glm = "0.17.0"
 #load pngs to use as textures
-png = "0.16"
+png = "0.17.6"
 pretty_env_logger = "0.4"
 #used to define custom error types (without boilerplate)
 thiserror = "1"
 #used to load 3D models int the Wavefront .obj format
-tobj = "2"
+tobj = "3.2.3"
 # to call the vulkan API
-vulkanalia = { version = "=0.12.0", features = ["libloading", "window"] }
+vulkanalia = { version = "=0.16.0", features = ["libloading", "window"] }
 #creation of window to render to
-winit = "0.24"
+winit = "0.27.4"
