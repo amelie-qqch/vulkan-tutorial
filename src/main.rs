@@ -395,10 +395,10 @@ unsafe fn check_physical_device(
     // }
 
     //Pas nécessaire
-    // let features = instance.get_physical_device_features(physical_device);
-    // if features.geometry_shader != vk::TRUE {
-    //     return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
-    // }
+    let features = instance.get_physical_device_features(physical_device);
+    if features.geometry_shader != vk::TRUE {
+        return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
+    }
 
     QueueFamilyIndices::get(instance, data, physical_device)?;
     check_physical_device_extensions(instance, physical_device)?;
