@@ -25,7 +25,6 @@ use thiserror::Error;
 use vulkanalia::vk::{ExtDebugUtilsExtension, InstanceCreateFlags};
 use vulkanalia::vk::KhrSurfaceExtension;
 use vulkanalia::vk::KhrSwapchainExtension;
-use winit::event::VirtualKeyCode::N;
 
 /// Whether the validation layers should be enabled.
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -53,7 +52,7 @@ fn main() -> Result<()>{
     // App
     let mut app = unsafe { App::create(&window)? };
     let mut destroying = false;
-    /**
+    /*
      * Les pipes sont pour définir une closure/fonction anonyme
      * Les _ pour marquer la présence de paramètres dont on ne se servira pas.
      *
@@ -112,7 +111,7 @@ impl App {
         create_swapchain(window, &instance, &logical_device, &mut data)?;
         create_swapchain_image_views(&logical_device, &mut data)?;
 
-        create_render_pass(&instance, &logical_device, &mut data);
+        create_render_pass(&instance, &logical_device, &mut data).unwrap();
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
@@ -916,7 +915,7 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
         device.cmd_draw(*command_buffer, 3, 1, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
-        device.end_command_buffer(*command_buffer);
+        device.end_command_buffer(*command_buffer).unwrap();
     }
 
 
