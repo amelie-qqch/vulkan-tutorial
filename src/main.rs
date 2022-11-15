@@ -22,10 +22,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 use thiserror::Error;
 
-use vulkanalia::vk::ExtDebugUtilsExtension;
+use vulkanalia::vk::{ExtDebugUtilsExtension, InstanceCreateFlags};
 use vulkanalia::vk::KhrSurfaceExtension;
 use vulkanalia::vk::KhrSwapchainExtension;
-use winit::event::VirtualKeyCode::N;
 
 /// Whether the validation layers should be enabled.
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -53,7 +52,7 @@ fn main() -> Result<()>{
     // App
     let mut app = unsafe { App::create(&window)? };
     let mut destroying = false;
-    /**
+    /*
      * Les pipes sont pour définir une closure/fonction anonyme
      * Les _ pour marquer la présence de paramètres dont on ne se servira pas.
      *
@@ -112,7 +111,7 @@ impl App {
         create_swapchain(window, &instance, &logical_device, &mut data)?;
         create_swapchain_image_views(&logical_device, &mut data)?;
 
-        create_render_pass(&instance, &logical_device, &mut data);
+        create_render_pass(&instance, &logical_device, &mut data).unwrap();
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
@@ -261,12 +260,15 @@ unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) ->
         .map(|e| e.as_ptr())
         .collect::<Vec<_>>();
 
+    extensions.push(vk::KHR_PORTABILITY_ENUMERATION_EXTENSION.name.as_ptr());
+
     if VALIDATION_ENABLED {
         extensions.push(vk::EXT_DEBUG_UTILS_EXTENSION.name.as_ptr());
     }
 
 
     let mut info = vk::InstanceCreateInfo::builder()
+        .flags(InstanceCreateFlags::all())
         .application_info(&application_info)
         .enabled_layer_names(&layers)
         .enabled_extension_names(&extensions);
@@ -395,10 +397,10 @@ unsafe fn check_physical_device(
     // }
 
     //Pas nécessaire
-    let features = instance.get_physical_device_features(physical_device);
+    /*let features = instance.get_physical_device_features(physical_device);
     if features.geometry_shader != vk::TRUE {
         return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
-    }
+    }*/
 
     QueueFamilyIndices::get(instance, data, physical_device)?;
     check_physical_device_extensions(instance, physical_device)?;
@@ -913,7 +915,7 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
         device.cmd_draw(*command_buffer, 3, 1, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
-        device.end_command_buffer(*command_buffer);
+        device.end_command_buffer(*command_buffer).unwrap();
     }
 
 
