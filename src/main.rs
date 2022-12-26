@@ -27,6 +27,15 @@ use vulkanalia::vk::KhrSurfaceExtension;
 use vulkanalia::vk::KhrSwapchainExtension;
 use winit::event::VirtualKeyCode::N;
 
+/// Import pour shader
+use std::mem::size_of;
+use nalgebra_glm as glm;
+use lazy_static::lazy_static;
+
+/// Import pour copier la mémoire vertex liste -> mapped memory
+use std::ptr::copy_nonoverlapping as memcpy;
+
+
 /// Whether the validation layers should be enabled.
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 /// The name of the validation layers.
@@ -34,6 +43,15 @@ const VALIDATION_LAYER: vk::ExtensionName = vk::ExtensionName::from_bytes(b"VK_L
 
 const DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+/// Input Vertex
+lazy_static! {
+    static ref VERTICES: Vec<Vertex> = vec![
+        Vertex::new(glm::vec2(0.0, -0.5), glm::vec3(1.0, 0.0, 0.0)),
+        Vertex::new(glm::vec2(0.5, 0.5), glm::vec3(0.0, 1.0, 0.0)),
+        Vertex::new(glm::vec2(-0.5, 0.5), glm::vec3(0.0, 0.0, 1.0)),
+    ];
+}
 
 
 // Pour compiler les shaders sur ubuntu:
@@ -53,6 +71,8 @@ fn main() -> Result<()>{
     // App
     let mut app = unsafe { App::create(&window)? };
     let mut destroying = false;
+    let mut minimized = false;
+
     /**
      * Les pipes sont pour définir une closure/fonction anonyme
      * Les _ pour marquer la présence de paramètres dont on ne se servira pas.
@@ -69,6 +89,15 @@ fn main() -> Result<()>{
             // Render a frame if Vulkan app is not being destroyed
             Event::MainEventsCleared if !destroying =>
                 unsafe { app.render(&window) }.unwrap(),
+
+            Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
+                if size.width == 0 || size.height == 0 {
+                    minimized = true;
+                } else {
+                    minimized = false;
+                    app.resized = true;
+                }
+            }
 
             // Destroy Vulkan app
             // Les .. permettent d'ignorer le reste des params, permet par exemple
@@ -93,6 +122,7 @@ struct App {
     data: AppData,
     logical_device: Device,
     frame: usize,
+    resized: bool,
 }
 
 impl App {
@@ -112,14 +142,17 @@ impl App {
         create_swapchain(window, &instance, &logical_device, &mut data)?;
         create_swapchain_image_views(&logical_device, &mut data)?;
 
-        create_render_pass(&instance, &logical_device, &mut data);
+        create_render_pass(&instance, &logical_device, &mut data)?;
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
+
+        create_vertex_buffer(&instance, &logical_device, &mut data)?;
         create_command_buffers(&logical_device, &mut data)?;
+
         create_sync_objects(&logical_device, &mut data)?;
 
-        Ok(Self { entry, instance, data, logical_device, frame: 0, })
+        Ok(Self { entry, instance, data, logical_device, frame: 0, resized: false})
     }
 
     /// Renders a frame for Vulkan app
@@ -130,8 +163,7 @@ impl App {
             u64::MAX,
         )?;
 
-        //Récupération de l'index d'une image disponnible
-        let image_index = self
+        let result = self
             .logical_device
             .acquire_next_image_khr(
                 self.data.swapchain,
@@ -139,8 +171,14 @@ impl App {
                 //Les objets de synchro qui devront être signalé quand la partie pres à finit d'utiliser les images
                 self.data.image_available_semaphores[self.frame],
                 vk::Fence::null(),
-            )?
-            .0 as usize;
+            );
+
+        //Récupération de l'index d'une image disponnible
+        let image_index = match result {
+            Ok((image_index, _)) => image_index as usize,
+            Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
+            Err(e) => return Err(anyhow!(e)),
+        };
 
         if !self.data.images_in_flight[image_index as usize].is_null() {
             self.logical_device.wait_for_fences(
@@ -183,16 +221,64 @@ impl App {
             .swapchains(swapchains)
             .image_indices(image_indices);
 
-        self.logical_device.queue_present_khr(self.data.prensentation_queue, &presentation_info)?;
+        let result= self.logical_device.queue_present_khr(
+            self.data.prensentation_queue, &presentation_info
+        );
+        let changed = result == Ok(vk::SuccessCode::SUBOPTIMAL_KHR)
+            || result == Err(vk::ErrorCode::OUT_OF_DATE_KHR);
+
+        if self.resized || changed {
+            self.recreate_swapchain(window)?;
+        } else if let Err(e) = result{
+            return Err(anyhow!(e));
+        }
 
         self.frame = (self.frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
         Ok(())
     }
 
+    unsafe fn recreate_swapchain(&mut self, window: &Window) -> Result<()> {
+        self.logical_device.device_wait_idle()?;
+        self.destroy_swapchain();
+
+        create_swapchain(window, &self.instance, &self.logical_device, &mut self.data)?;
+        create_swapchain_image_views(&self.logical_device, &mut self.data)?;
+        create_render_pass(&self.instance, &self.logical_device, &mut self.data)?;
+        create_pipeline(&self.logical_device, &mut self.data)?;
+        create_framebuffers(&self.logical_device, &mut self.data)?;
+        create_command_buffers(&self.logical_device, &mut self.data)?;
+
+        self.data
+            .images_in_flight
+            .resize(self.data.swapchain_images.len(), vk::Fence::null())
+        ;
+
+        Ok(())
+    }
+
+    unsafe fn destroy_swapchain(&mut self) {
+        self.data.framebuffers
+            .iter()
+            .for_each(|f| self.logical_device.destroy_framebuffer(*f, None));
+        self.logical_device.free_command_buffers(self.data.command_pool, &self.data.command_buffers);
+
+        self.logical_device.destroy_pipeline(self.data.pipeline, None);
+        self.logical_device.destroy_pipeline_layout(self.data.pipeline_layout, None);
+        self.logical_device.destroy_render_pass(self.data.render_pass, None);
+        self.data.swapchain_image_views
+            .iter()
+            .for_each(|v| self.logical_device.destroy_image_view(*v, None));
+        self.logical_device.destroy_swapchain_khr(self.data.swapchain, None);
+
+    }
+
     /// Destroys Vulkan app
     #[rustfmt::skip]
     unsafe fn destroy(&mut self) {
+        self.destroy_swapchain();
+        self.logical_device.destroy_buffer(self.data.vertex_buffer, None);
+        self.logical_device.free_memory(self.data.vertex_buffer_memory, None);
 
         self.data.in_flight_fences
             .iter()
@@ -205,19 +291,6 @@ impl App {
             .for_each(|s| self.logical_device.destroy_semaphore(*s, None));
 
         self.logical_device.destroy_command_pool(self.data.command_pool, None);
-        self.data.framebuffers
-            .iter()
-            .for_each(|f| self.logical_device.destroy_framebuffer(*f, None));
-
-        self.logical_device.destroy_pipeline(self.data.pipeline, None);
-        self.logical_device.destroy_pipeline_layout(self.data.pipeline_layout, None);
-        self.logical_device.destroy_render_pass(self.data.render_pass, None);
-
-        self.data.swapchain_image_views
-            .iter()
-            .for_each(|v| self.logical_device.destroy_image_view(*v, None));
-
-        self.logical_device.destroy_swapchain_khr(self.data.swapchain, None);
         self.logical_device.destroy_device(None);
         self.instance.destroy_surface_khr(self.data.surface, None);
 
@@ -289,7 +362,6 @@ unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) ->
     Ok(instance)
 }
 
-
 /// The Vulkan handles and associated properties used by Vulkan App
 #[derive(Clone, Debug, Default)]
 struct AppData{
@@ -313,6 +385,104 @@ struct AppData{
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     images_in_flight: Vec<vk::Fence>,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
+}
+
+/// VERTEX DATA
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Vertex {
+    pos: glm::Vec2,
+    color: glm::Vec3,
+}
+
+impl Vertex {
+    fn new(pos: glm::Vec2, color: glm::Vec3) -> Self {
+        Self { pos, color }
+    }
+
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()
+    }
+
+    fn attribute_description() -> [vk::VertexInputAttributeDescription; 2] {
+        let pos = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(0)
+            .build();
+
+        let color = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(size_of::<glm::Vec2>() as u32)
+            .build();
+
+        [pos, color]
+    }
+}
+
+unsafe fn create_vertex_buffer(
+    instance: &Instance,
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let buffer_info = vk::BufferCreateInfo::builder()
+        .size((size_of::<Vertex>() * VERTICES.len()) as u64)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    data.vertex_buffer = device.create_buffer(&buffer_info, None)?;
+
+    let requirements = device.get_buffer_memory_requirements(data.vertex_buffer);
+
+    let memory_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(requirements.size)
+        .memory_type_index(get_memory_type_index(
+            instance,
+            data,
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            requirements,
+        )?);
+
+    data.vertex_buffer_memory = device.allocate_memory(&memory_info, None)?;
+    device.bind_buffer_memory(data.vertex_buffer, data.vertex_buffer_memory, 0)?;
+
+    let memory = device.map_memory(
+        data.vertex_buffer_memory,
+        0,
+        buffer_info.size,
+        vk::MemoryMapFlags::empty(),
+    )?;
+
+    memcpy(VERTICES.as_ptr(), memory.cast(), VERTICES.len());
+    device.unmap_memory(data.vertex_buffer_memory);
+
+    Ok(())
+}
+
+unsafe fn get_memory_type_index(
+    instance: &Instance,
+    data: &AppData,
+    properties: vk::MemoryPropertyFlags,
+    requirements: vk::MemoryRequirements,
+) -> Result<u32> {
+    let memory = instance.get_physical_device_memory_properties(data.physical_device);
+
+    (0..memory.memory_type_count)
+        .find(|i| {
+            let suitable = (requirements.memory_type_bits & (1 << i)) != 0;
+            let memory_type = memory.memory_types[*i as usize];
+            suitable && memory_type.property_flags.contains(properties)
+        })
+        .ok_or_else(|| anyhow!("Failed to find suitable memory type."))
 }
 
 /////// LOGICAL DEVICE ///////
@@ -395,10 +565,10 @@ unsafe fn check_physical_device(
     // }
 
     //Pas nécessaire
-    let features = instance.get_physical_device_features(physical_device);
-    if features.geometry_shader != vk::TRUE {
-        return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
-    }
+    //let features = instance.get_physical_device_features(physical_device);
+    //if features.geometry_shader != vk::TRUE {
+    //    return Err(anyhow!(SuitabilityError("Missing geometry shader support.")));
+    //}
 
     QueueFamilyIndices::get(instance, data, physical_device)?;
     check_physical_device_extensions(instance, physical_device)?;
@@ -628,8 +798,13 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .module(frag_shader_module)
         .name(b"main\0");
 
+    let binding_descriptions = &[Vertex::binding_description()];
+    let attribute_descriptions = Vertex::attribute_description();
 
-    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder();
+    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
+        .vertex_binding_descriptions(binding_descriptions)
+        .vertex_attribute_descriptions(&attribute_descriptions);
+
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
         .primitive_restart_enable(false);
@@ -910,10 +1085,11 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             *command_buffer, vk::PipelineBindPoint::GRAPHICS, data.pipeline
         );
 
-        device.cmd_draw(*command_buffer, 3, 1, 0, 0);
+        device.cmd_bind_vertex_buffers(*command_buffer, 0, &[data.vertex_buffer], &[0]);
+        device.cmd_draw(*command_buffer, VERTICES.len() as u32, 1, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
-        device.end_command_buffer(*command_buffer);
+        device.end_command_buffer(*command_buffer)?;
     }
 
 
