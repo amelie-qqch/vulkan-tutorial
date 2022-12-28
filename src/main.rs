@@ -35,6 +35,7 @@ use lazy_static::lazy_static;
 /// Import pour copier la mémoire vertex liste -> mapped memory
 use std::ptr::copy_nonoverlapping as memcpy;
 
+use std::time::Instant;
 
 /// Whether the validation layers should be enabled.
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -126,11 +127,13 @@ struct App {
     logical_device: Device,
     frame: usize,
     resized: bool,
+    start: Instant,
 }
 
 impl App {
     /// Creates Vulkan app
     unsafe fn create(window: &Window) -> Result<Self> {
+
         let loader = LibloadingLoader::new(LIBRARY)?;
         let entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
         let mut data = AppData::default();
@@ -146,17 +149,24 @@ impl App {
         create_swapchain_image_views(&logical_device, &mut data)?;
 
         create_render_pass(&instance, &logical_device, &mut data)?;
+
+        create_descriptor_set_layout(&logical_device, &mut data)?;
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
 
         create_vertex_buffer(&instance, &logical_device, &mut data)?;
         create_index_buffer(&instance, &logical_device, &mut data)?;
+
+        create_uniform_buffers(&instance, &logical_device, &mut data)?;
+        create_descriptor_pool(&logical_device, &mut data)?;
+        create_descriptor_sets(&logical_device, &mut data)?;
+
         create_command_buffers(&logical_device, &mut data)?;
 
         create_sync_objects(&logical_device, &mut data)?;
 
-        Ok(Self { entry, instance, data, logical_device, frame: 0, resized: false})
+        Ok(Self { entry, instance, data, logical_device, frame: 0, resized: false, start: Instant::now()})
     }
 
     /// Renders a frame for Vulkan app
@@ -193,6 +203,8 @@ impl App {
         }
 
         self.data.images_in_flight[image_index as usize] = self.data.in_flight_fences[self.frame];
+
+        self.update_uniform_buffer(image_index)?;
 
         //Spécifique quelle sémaphore il faut attendre avant que l'execution ne commence
         let wait_semaphores = &[self.data.image_available_semaphores[self.frame]];
@@ -242,6 +254,49 @@ impl App {
         Ok(())
     }
 
+    unsafe fn update_uniform_buffer(
+        &self,
+        image_index: usize
+    ) -> Result<()> {
+        let time = self.start.elapsed().as_secs_f32();
+
+        let model = glm::rotate(
+            &glm::identity(),
+            time * glm::radians(&glm::vec1(90.0))[0],
+            &glm::vec3(0.0, 0.0, 1.0),
+        );
+
+        let view = glm::look_at(
+            &glm::vec3(2.0, 2.0, 2.0),
+            &glm::vec3(0.0, 0.0, 0.0),
+            &glm::vec3(0.0, 0.0, 1.0),
+        );
+
+        let mut proj = glm::perspective(
+            self.data.swapchain_extent.width as f32 / self.data.swapchain_extent.height as f32,
+            glm::radians(&glm::vec1(45.0))[0],
+            0.1,
+            10.0,
+        );
+
+        proj[(1,1)] *= -1.0;
+
+        let ubo = UniformBufferObject { model, view, proj };
+
+        let memory = self.logical_device.map_memory(
+            self.data.uniform_buffers_memory[image_index],
+            0,
+            size_of::<UniformBufferObject>() as u64,
+            vk::MemoryMapFlags::empty(),
+        )?;
+
+        memcpy(&ubo, memory.cast(), 1);
+
+        self.logical_device.unmap_memory(self.data.uniform_buffers_memory[image_index]);
+
+        Ok(())
+    }
+
     unsafe fn recreate_swapchain(&mut self, window: &Window) -> Result<()> {
         self.logical_device.device_wait_idle()?;
         self.destroy_swapchain();
@@ -250,7 +305,12 @@ impl App {
         create_swapchain_image_views(&self.logical_device, &mut self.data)?;
         create_render_pass(&self.instance, &self.logical_device, &mut self.data)?;
         create_pipeline(&self.logical_device, &mut self.data)?;
+
         create_framebuffers(&self.logical_device, &mut self.data)?;
+        create_uniform_buffers(&self.instance, &self.logical_device, &mut self.data)?;
+        create_descriptor_pool(&self.logical_device, &mut self.data)?;
+        create_descriptor_sets(&self.logical_device, &mut self.data)?;
+
         create_command_buffers(&self.logical_device, &mut self.data)?;
 
         self.data
@@ -262,6 +322,15 @@ impl App {
     }
 
     unsafe fn destroy_swapchain(&mut self) {
+        self.logical_device.destroy_descriptor_pool(self.data.descriptor_pool, None);
+
+        self.data.uniform_buffers
+            .iter()
+            .for_each(|b| self.logical_device.destroy_buffer(*b, None));
+        self.data.uniform_buffers_memory
+            .iter()
+            .for_each(|m| self.logical_device.free_memory(*m, None));
+
         self.data.framebuffers
             .iter()
             .for_each(|f| self.logical_device.destroy_framebuffer(*f, None));
@@ -281,6 +350,7 @@ impl App {
     #[rustfmt::skip]
     unsafe fn destroy(&mut self) {
         self.destroy_swapchain();
+        self.logical_device.destroy_descriptor_set_layout(self.data.descriptor_set_layout, None);
         self.logical_device.destroy_buffer(self.data.index_buffer, None);
         self.logical_device.free_memory(self.data.index_buffer_memory, None);
         self.logical_device.destroy_buffer(self.data.vertex_buffer, None);
@@ -382,6 +452,7 @@ struct AppData{
     swapchain_images: Vec<vk::Image>,
     swapchain_image_views: Vec<vk::ImageView>,
     render_pass: vk::RenderPass,
+    descriptor_set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
@@ -395,6 +466,10 @@ struct AppData{
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
     index_buffer_memory: vk::DeviceMemory,
+    uniform_buffers: Vec<vk::Buffer>,
+    uniform_buffers_memory: Vec<vk::DeviceMemory>,
+    descriptor_pool: vk::DescriptorPool,
+    descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 /////// LOGICAL DEVICE ///////
@@ -745,7 +820,7 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.0)
         .cull_mode(vk::CullModeFlags::BACK)
-        .front_face(vk::FrontFace::CLOCKWISE)
+        .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .depth_bias_enable(false);
 
 
@@ -770,7 +845,9 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .attachments(attachments)
         .blend_constants([0.0, 0.0, 0.0, 0.0]);
 
-    let layout_info = vk::PipelineLayoutCreateInfo::builder();
+    let set_layouts = &[data.descriptor_set_layout];
+    let layout_info = vk::PipelineLayoutCreateInfo::builder()
+        .set_layouts(set_layouts);
     data.pipeline_layout = device.create_pipeline_layout(&layout_info, None)?;
 
     let stages = &[vert_stage, frag_stage];
@@ -1004,6 +1081,14 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             0,
             vk::IndexType::UINT16
         );
+        device.cmd_bind_descriptor_sets(
+            *command_buffer,
+            vk::PipelineBindPoint::GRAPHICS,
+            data.pipeline_layout,
+            0,
+            &[data.descriptor_sets[i]],
+            &[],
+        );
 
         device.cmd_draw_indexed(
             *command_buffer,
@@ -1174,6 +1259,39 @@ unsafe fn get_memory_type_index(
         .ok_or_else(|| anyhow!("Failed to find suitable memory type."))
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct UniformBufferObject {
+    model: glm::Mat4,
+    view: glm::Mat4,
+    proj: glm::Mat4,
+}
+
+unsafe fn create_uniform_buffers(
+    instance: &Instance,
+    logical_device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    data.uniform_buffers.clear();
+    data.uniform_buffers_memory.clear();
+
+    for _ in 0..data.swapchain_images.len() {
+        let (uniform_buffer, uniform_buffer_memory) = create_buffer(
+            instance,
+            logical_device,
+            data,
+            size_of::<UniformBufferObject>() as u64,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+        )?;
+
+        data.uniform_buffers.push(uniform_buffer);
+        data.uniform_buffers_memory.push(uniform_buffer_memory);
+    }
+
+    Ok(())
+}
+
 unsafe fn create_buffer(
     instance: &Instance,
     logical_device: &Device,
@@ -1237,6 +1355,74 @@ unsafe fn copy_buffer(
     logical_device.queue_submit(data.graphics_queue, &[info], vk::Fence::null())?;
     logical_device.queue_wait_idle(data.graphics_queue)?;
     logical_device.free_command_buffers(data.command_pool, command_buffers);
+
+    Ok(())
+}
+
+unsafe fn create_descriptor_set_layout(
+    logical_device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let ubo_binding = vk::DescriptorSetLayoutBinding::builder()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::VERTEX);
+
+    let bindings = &[ubo_binding];
+    let info = vk::DescriptorSetLayoutCreateInfo::builder()
+        .bindings(bindings);
+
+    data.descriptor_set_layout = logical_device.create_descriptor_set_layout(&info, None)?;
+
+    Ok(())
+}
+
+unsafe fn create_descriptor_pool(
+    logical_device: &Device,
+    data: &mut AppData
+) -> Result<()> {
+    let ubo_size = vk::DescriptorPoolSize::builder()
+        .type_(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(data.swapchain_images.len() as u32);
+
+    let pool_sizes = &[ubo_size];
+    let info = vk::DescriptorPoolCreateInfo::builder()
+        .pool_sizes(pool_sizes)
+        .max_sets(data.swapchain_images.len() as u32);
+
+    data.descriptor_pool = logical_device.create_descriptor_pool(&info, None)?;
+
+    Ok(())
+}
+
+unsafe fn create_descriptor_sets(
+    logical_device: &Device,
+    data: &mut AppData
+) -> Result<()> {
+    let layouts = vec![data.descriptor_set_layout; data.swapchain_images.len()];
+    let info = vk::DescriptorSetAllocateInfo::builder()
+        .descriptor_pool(data.descriptor_pool)
+        .set_layouts(&layouts);
+
+    data.descriptor_sets = logical_device.allocate_descriptor_sets(&info)?;
+
+    for i in 0..data.swapchain_images.len() {
+        let info = vk::DescriptorBufferInfo::builder()
+            .buffer(data.uniform_buffers[i])
+            .offset(0)
+            .range(size_of::<UniformBufferObject>() as u64);
+
+        let buffer_info = &[info];
+        let ubo_write = vk::WriteDescriptorSet::builder()
+            .dst_set(data.descriptor_sets[i])
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(buffer_info);
+
+        logical_device.update_descriptor_sets(&[ubo_write], &[] as &[vk::CopyDescriptorSet]);
+    }
 
     Ok(())
 }
