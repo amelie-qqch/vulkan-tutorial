@@ -36,6 +36,7 @@ use lazy_static::lazy_static;
 use std::ptr::copy_nonoverlapping as memcpy;
 
 use std::time::Instant;
+use std::fs::File;
 
 /// Whether the validation layers should be enabled.
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
@@ -154,6 +155,8 @@ impl App {
         create_pipeline(&logical_device, &mut data)?;
         create_framebuffers(&logical_device, &mut data)?;
         create_command_pool(&instance, &logical_device, &mut data)?;
+
+        create_texture_image(&instance, &logical_device, &mut data)?;
 
         create_vertex_buffer(&instance, &logical_device, &mut data)?;
         create_index_buffer(&instance, &logical_device, &mut data)?;
@@ -350,6 +353,10 @@ impl App {
     #[rustfmt::skip]
     unsafe fn destroy(&mut self) {
         self.destroy_swapchain();
+
+        self.logical_device.destroy_image(self.data.texture_image, None);
+        self.logical_device.free_memory(self.data.texture_image_memory, None);
+
         self.logical_device.destroy_descriptor_set_layout(self.data.descriptor_set_layout, None);
         self.logical_device.destroy_buffer(self.data.index_buffer, None);
         self.logical_device.free_memory(self.data.index_buffer_memory, None);
@@ -470,6 +477,8 @@ struct AppData{
     uniform_buffers_memory: Vec<vk::DeviceMemory>,
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: Vec<vk::DescriptorSet>,
+    texture_image: vk::Image,
+    texture_image_memory: vk::DeviceMemory,
 }
 
 /////// LOGICAL DEVICE ///////
@@ -1331,30 +1340,115 @@ unsafe fn copy_buffer(
     destination: vk::Buffer,
     size: vk::DeviceSize,
 ) -> Result<()> {
-    let info = vk::CommandBufferAllocateInfo::builder()
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_pool(data.command_pool)
-        .command_buffer_count(1);
-
-    let command_buffer = logical_device.allocate_command_buffers(&info)?[0];
-
-    let info = vk::CommandBufferBeginInfo::builder()
-        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-
-    logical_device.begin_command_buffer(command_buffer, &info)?;
+    let command_buffer = begin_single_time_commands(logical_device, data)?;
 
     let regions = vk::BufferCopy::builder().size(size);
-
     logical_device.cmd_copy_buffer(command_buffer, source, destination, &[regions]);
-    logical_device.end_command_buffer(command_buffer)?;
 
-    let command_buffers = &[command_buffer];
-    let info = vk::SubmitInfo::builder()
-        .command_buffers(command_buffers);
+    end_single_time_commands(logical_device, data, command_buffer)?;
 
-    logical_device.queue_submit(data.graphics_queue, &[info], vk::Fence::null())?;
-    logical_device.queue_wait_idle(data.graphics_queue)?;
-    logical_device.free_command_buffers(data.command_pool, command_buffers);
+    Ok(())
+}
+
+unsafe fn copy_buffer_to_image(
+    logical_device: &Device,
+    data: &AppData,
+    buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let command_buffer = begin_single_time_commands(logical_device, data)?;
+
+    let subresource = vk::ImageSubresourceLayers::builder()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .mip_level(0)
+        .base_array_layer(0)
+        .layer_count(1);
+
+    let region = vk::BufferImageCopy::builder()
+        .buffer_offset(0)
+        .buffer_row_length(0)
+        .buffer_image_height(0)
+        .image_subresource(subresource)
+        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0})
+        .image_extent(vk::Extent3D {width, height, depth: 1});
+
+    logical_device.cmd_copy_buffer_to_image(
+        command_buffer,
+        buffer,
+        image,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        &[region],
+    );
+
+    end_single_time_commands(logical_device, data, command_buffer)?;
+
+    Ok(())
+}
+
+unsafe fn transition_image_layout(
+    device: &Device,
+    data: &AppData,
+    image: vk::Image,
+    format: vk::Format,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Result<()> {
+    let (
+        src_access_mask,
+        dst_access_mask,
+        src_stage_mask,
+        dst_stage_mask,
+    ) = match (old_layout, new_layout) {
+        //Pre-barrier operations
+        (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+            vk::AccessFlags::empty(),
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            vk::PipelineStageFlags::TRANSFER,
+        ),
+        //Barrier operations
+        (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+            vk::AccessFlags::TRANSFER_WRITE,
+            vk::AccessFlags::SHADER_READ,
+            vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::FRAGMENT_SHADER,
+        ),
+        _ => return Err(anyhow!("Unsupported image layout transition :'(")),
+    };
+
+    let command_buffer = begin_single_time_commands(device, data)?;
+
+    let subresource = vk::ImageSubresourceRange::builder()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1);
+
+    let barrier = vk::ImageMemoryBarrier::builder()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        //setté à IGNORED pour ne pas transférer la queue_family ownership
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(subresource)
+        .src_access_mask(src_access_mask)
+        .dst_access_mask(dst_access_mask);
+
+    device.cmd_pipeline_barrier(
+        command_buffer,
+        src_stage_mask,
+        dst_stage_mask,
+        vk::DependencyFlags::empty(),
+        &[] as &[vk::MemoryBarrier],
+        &[] as &[vk::BufferMemoryBarrier],
+        &[barrier],
+    );
+
+    end_single_time_commands(device, data, command_buffer)?;
 
     Ok(())
 }
@@ -1453,6 +1547,173 @@ unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()>
 
     Ok(())
 }
+
+//////// IMAGE CREATION ////////
+unsafe fn create_texture_image(
+    instance: &Instance,
+    logical_device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let image = File::open("resources/texture.png")?;
+
+    let decoder = png::Decoder::new(image);
+    let mut reader = decoder.read_info()?;
+
+    let mut pixels = vec![0; reader.1.info().raw_bytes()];
+    reader.1.next_frame(&mut pixels)?;
+
+    let size = reader.1.info().raw_bytes() as u64;
+    let (width, height) = reader.1.info().size();
+
+    let (staging_buffer, staging_buffer_memory) = create_buffer(
+        instance,
+        logical_device,
+        data,
+        size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE
+    )?;
+
+    let memory = logical_device.map_memory(
+        staging_buffer_memory,
+        0,
+        size,
+        vk::MemoryMapFlags::empty(),
+    )?;
+
+    memcpy(pixels.as_ptr(), memory.cast(), pixels.len());
+
+    logical_device.unmap_memory(staging_buffer_memory);
+
+    let (texture_image, texture_image_memory) = create_image(
+        instance,
+        logical_device,
+        data,
+        width,
+        height,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageTiling::OPTIMAL,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+
+    data.texture_image = texture_image;
+    data.texture_image_memory = texture_image_memory;
+
+    transition_image_layout(
+        logical_device,
+        data,
+        data.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::UNDEFINED,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+    )?;
+
+    copy_buffer_to_image(
+        logical_device,
+        data,
+        staging_buffer,
+        data.texture_image,
+        width,
+        height,
+    )?;
+
+    transition_image_layout(
+        logical_device,
+        data,
+        data.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    )?;
+
+    logical_device.destroy_buffer(staging_buffer, None);
+    logical_device.free_memory(staging_buffer_memory, None);
+
+    Ok(())
+}
+
+unsafe fn create_image(
+    instance: &Instance,
+    logical_device: &Device,
+    data: &AppData,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    tiling: vk::ImageTiling,
+    usage: vk::ImageUsageFlags,
+    properties: vk::MemoryPropertyFlags,
+) -> Result<(vk::Image, vk::DeviceMemory)> {
+    let info = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::_2D)
+        .extent(vk::Extent3D { width, height, depth:1})
+        .mip_levels(1)
+        .array_layers(1)
+        .format(format)
+        .tiling(tiling)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(usage)
+        .samples(vk::SampleCountFlags::_1)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let image = logical_device.create_image(&info, None)?;
+
+    let requirements = logical_device.get_image_memory_requirements(image);
+
+    let info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(requirements.size)
+        .memory_type_index(get_memory_type_index(
+            instance,
+            data,
+            properties,
+            requirements,
+        )?);
+
+    let image_memory = logical_device.allocate_memory(&info, None)?;
+    logical_device.bind_image_memory(image, image_memory, 0)?;
+
+    Ok((image, image_memory))
+
+}
+
+unsafe fn begin_single_time_commands(
+    logical_device: &Device,
+    data: &AppData,
+) -> Result<vk::CommandBuffer> {
+    let info = vk::CommandBufferAllocateInfo::builder()
+        .level(vk::CommandBufferLevel::PRIMARY)
+        .command_pool(data.command_pool)
+        .command_buffer_count(1);
+
+    let command_buffer = logical_device.allocate_command_buffers(&info)?[0];
+
+    let info = vk::CommandBufferBeginInfo::builder()
+        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+    logical_device.begin_command_buffer(command_buffer, &info)?;
+
+    Ok(command_buffer)
+}
+
+unsafe fn end_single_time_commands(
+    logical_device: &Device,
+    data: &AppData,
+    command_buffer: vk::CommandBuffer,
+) -> Result<()> {
+    logical_device.end_command_buffer(command_buffer)?;
+
+    let command_buffers = &[command_buffer];
+    let info = vk::SubmitInfo::builder()
+        .command_buffers(command_buffers);
+
+    logical_device.queue_submit(data.graphics_queue, &[info], vk::Fence::null())?;
+    logical_device.queue_wait_idle(data.graphics_queue)?;
+
+    logical_device.free_command_buffers(data.command_pool, &[command_buffer]);
+
+    Ok(())
+}
+
 
 #[derive(Debug, Error)]
 #[error("Missing {0}.")]
