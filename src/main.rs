@@ -633,7 +633,7 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
 
     let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder();
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
+        .topology(vk::PrimitiveTopology::TRIANGLE_STRIP)
         .primitive_restart_enable(false);
 
     let viewport = vk::Viewport::builder()
@@ -912,7 +912,7 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             *command_buffer, vk::PipelineBindPoint::GRAPHICS, data.pipeline
         );
 
-        device.cmd_draw(*command_buffer, 3, 1, 0, 0);
+        device.cmd_draw(*command_buffer, 5, 1, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
         device.end_command_buffer(*command_buffer).unwrap();
