@@ -22,7 +22,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Window, WindowBuilder};
 use thiserror::Error;
 
-use vulkanalia::vk::ExtDebugUtilsExtension;
+use vulkanalia::vk::{ExtDebugUtilsExtension, InstanceCreateFlags};
 use vulkanalia::vk::KhrSurfaceExtension;
 use vulkanalia::vk::KhrSwapchainExtension;
 
@@ -600,12 +600,15 @@ unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) ->
         .map(|e| e.as_ptr())
         .collect::<Vec<_>>();
 
+    extensions.push(vk::KHR_PORTABILITY_ENUMERATION_EXTENSION.name.as_ptr());
+
     if VALIDATION_ENABLED {
         extensions.push(vk::EXT_DEBUG_UTILS_EXTENSION.name.as_ptr());
     }
 
 
     let mut info = vk::InstanceCreateInfo::builder()
+        .flags(InstanceCreateFlags::all())
         .application_info(&application_info)
         .enabled_layer_names(&layers)
         .enabled_extension_names(&extensions);
