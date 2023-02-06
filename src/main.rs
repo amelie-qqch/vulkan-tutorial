@@ -75,7 +75,7 @@ fn main() -> Result<()>{
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
                 destroying = true;
                 *control_flow = ControlFlow::Exit;
-                unsafe { app.logical_device.device_wait_idle().unwrap(); }
+                unsafe { app.device.device_wait_idle().unwrap(); }
                 unsafe { app.destroy(); }
             }
             _ => {}
@@ -90,7 +90,7 @@ struct App {
     entry: Entry,
     instance: Instance,
     data: AppData,
-    logical_device: Device,
+    device: Device,
     frame: usize,
 }
 
@@ -118,12 +118,12 @@ impl App {
         create_command_buffers(&logical_device, &mut data)?;
         create_sync_objects(&logical_device, &mut data)?;
 
-        Ok(Self { entry, instance, data, logical_device, frame: 0, })
+        Ok(Self { entry, instance, data, device: logical_device, frame: 0, })
     }
 
     /// Renders a frame for Vulkan app
     unsafe fn render(&mut self, window: &Window) -> Result<()> {
-        self.logical_device.wait_for_fences(
+        self.device.wait_for_fences(
             &[self.data.in_flight_fences[self.frame]],
             true,
             u64::MAX,
@@ -131,7 +131,7 @@ impl App {
 
         //Récupération de l'index d'une image disponnible
         let image_index = self
-            .logical_device
+            .device
             .acquire_next_image_khr(
                 self.data.swapchain,
                 u64::MAX,
@@ -142,7 +142,7 @@ impl App {
             .0 as usize;
 
         if !self.data.images_in_flight[image_index as usize].is_null() {
-            self.logical_device.wait_for_fences(
+            self.device.wait_for_fences(
                 &[self.data.images_in_flight[image_index as usize]],
                 true,
                 u64::MAX,
@@ -166,9 +166,9 @@ impl App {
             .command_buffers(command_buffers)
             .signal_semaphores(signal_semaphores);
 
-        self.logical_device.reset_fences(&[self.data.in_flight_fences[self.frame]])?;
+        self.device.reset_fences(&[self.data.in_flight_fences[self.frame]])?;
 
-        self.logical_device.queue_submit(
+        self.device.queue_submit(
             self.data.graphics_queue,
             &[submit_info],
             self.data.in_flight_fences[self.frame]
@@ -182,7 +182,7 @@ impl App {
             .swapchains(swapchains)
             .image_indices(image_indices);
 
-        self.logical_device.queue_present_khr(self.data.prensentation_queue, &presentation_info)?;
+        self.device.queue_present_khr(self.data.prensentation_queue, &presentation_info)?;
 
         self.frame = (self.frame + 1) % MAX_FRAMES_IN_FLIGHT;
 
@@ -195,29 +195,29 @@ impl App {
 
         self.data.in_flight_fences
             .iter()
-            .for_each(|f| self.logical_device.destroy_fence(*f, None));
+            .for_each(|f| self.device.destroy_fence(*f, None));
         self.data.render_finished_semaphores
             .iter()
-            .for_each(|s| self.logical_device.destroy_semaphore(*s, None));
+            .for_each(|s| self.device.destroy_semaphore(*s, None));
         self.data.image_available_semaphores
             .iter()
-            .for_each(|s| self.logical_device.destroy_semaphore(*s, None));
+            .for_each(|s| self.device.destroy_semaphore(*s, None));
 
-        self.logical_device.destroy_command_pool(self.data.command_pool, None);
+        self.device.destroy_command_pool(self.data.command_pool, None);
         self.data.framebuffers
             .iter()
-            .for_each(|f| self.logical_device.destroy_framebuffer(*f, None));
+            .for_each(|f| self.device.destroy_framebuffer(*f, None));
 
-        self.logical_device.destroy_pipeline(self.data.pipeline, None);
-        self.logical_device.destroy_pipeline_layout(self.data.pipeline_layout, None);
-        self.logical_device.destroy_render_pass(self.data.render_pass, None);
+        self.device.destroy_pipeline(self.data.pipeline, None);
+        self.device.destroy_pipeline_layout(self.data.pipeline_layout, None);
+        self.device.destroy_render_pass(self.data.render_pass, None);
 
         self.data.swapchain_image_views
             .iter()
-            .for_each(|v| self.logical_device.destroy_image_view(*v, None));
+            .for_each(|v| self.device.destroy_image_view(*v, None));
 
-        self.logical_device.destroy_swapchain_khr(self.data.swapchain, None);
-        self.logical_device.destroy_device(None);
+        self.device.destroy_swapchain_khr(self.data.swapchain, None);
+        self.device.destroy_device(None);
         self.instance.destroy_surface_khr(self.data.surface, None);
 
         if VALIDATION_ENABLED {
